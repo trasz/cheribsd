@@ -40,6 +40,7 @@
 #include <cheri/cheri.h>
 #include <cheri/cheric.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "cheritest.h"
@@ -449,7 +450,14 @@ test_string_memmove(const struct cheri_test *ctp __unused)
 void
 test_unaligned_capability_copy_memcpy(const struct cheri_test *ctp __unused)
 {
-	/* Copying a tagged capability to an unaligned destination should trap. */
+	/*
+	 * Copying a tagged capability to an unaligned destination should trap
+	 * if the memcpy tag stripping detection is enabled.
+	 *
+	 * Note: This test assumes that we haven't triggered a tag stripping
+	 * memcpy() yet, since the env var is only read on the first violation.
+	 */
+	setenv("CHERI_ABORT_ON_TAG_STRIPPING_COPY", "1", 1);
 	void * __capability src_buffer[2];
 	_Alignas(void * __capability) char dest_buffer[2 * sizeof(void* __capability) + 1];
 
@@ -482,7 +490,14 @@ test_unaligned_capability_copy_memcpy(const struct cheri_test *ctp __unused)
 void
 test_unaligned_capability_copy_memmove(const struct cheri_test *ctp __unused)
 {
-	/* Copying a tagged capability to an unaligned destination should trap. */
+	/*
+	 * Copying a tagged capability to an unaligned destination should trap
+	 * if the memcpy tag stripping detection is enabled.
+	 *
+	 * Note: This test assumes that we haven't triggered a tag stripping
+	 * memcpy() yet, since the env var is only read on the first violation.
+	 */
+	setenv("CHERI_ABORT_ON_TAG_STRIPPING_COPY", "1", 1);
 	void * __capability src_buffer[2];
 	_Alignas(void * __capability) char dest_buffer[2 * sizeof(void* __capability) + 1];
 

@@ -50,6 +50,10 @@ static char sccsid[] = "@(#)bcopy.c	8.1 (Berkeley) 6/4/93";
 __FBSDID("$FreeBSD$");
 
 #include <sys/types.h>
+#include <sys/sysctl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "cheri_private.h"
 
 /*
@@ -64,6 +68,105 @@ typedef	int word;		/* "word" used for optimal copy speed */
 
 #define	wsize	sizeof(word)
 #define	wmask	(wsize - 1)
+
+#if __has_feature(capabilities)
+extern ssize_t	write(int, const void *, size_t);
+#define write_to_stderr(str) write(2, (str), strlen(str))
+extern int __sysctlbyname(const char *name, size_t namelen, void *oldp,
+    size_t *oldlenp, const void *newp, size_t newlen);
+#define ABORT_ON_TAG_LOSS_SYSCTL "security.cheri.abort_on_memcpy_tag_loss"
+#define ABORT_ON_TAG_LOSS_ENVVAR "CHERI_ABORT_ON_TAG_STRIPPING_COPY"
+
+static void
+handle_untagged_copy(const void *__capability taggedcap, vaddr_t src_addr,
+    vaddr_t dst_addr, size_t offset)
+{
+	char errmsg_buffer[1024];
+	/* XXXAR: These functions do not exist yet... */
+	snprintf(errmsg_buffer, sizeof(errmsg_buffer),
+	    "%s: Attempting to copy a tagged capability (%#p) from 0x%jx to "
+	    "underaligned destination 0x%jx. Use memmove_nocap()/memcpy_nocap()"
+	    " if you intended to strip tags.\n", getprogname(),
+#ifdef __CHERI_PURE_CAPABILITY__
+	    taggedcap,
+#else
+	    /* Can't use capabilities in fprintf in hybrid mode */
+	    (void *)(uintptr_t)(__cheri_addr vaddr_t)(taggedcap),
+#endif
+	    (uintmax_t)(src_addr + offset), (uintmax_t)(dst_addr + offset));
+	write_to_stderr(errmsg_buffer);
+	/* TODO: allow overriding the behaviour with a function pointer? */
+	static uint32_t abort_on_tag_loss = -1;
+	if (abort_on_tag_loss == -1) {
+		const char *from_env = getenv(ABORT_ON_TAG_LOSS_ENVVAR);
+		if (from_env != NULL) {
+			/* Enabled unless empty or starts with zero. */
+			if (*from_env == '\0' || *from_env == '0')
+				abort_on_tag_loss = 0;
+			else
+				abort_on_tag_loss = 1;
+		}
+	}
+	if (abort_on_tag_loss == -1) {
+		/* If the env var is not set fall back to the global sysctl */
+		size_t olen = sizeof(abort_on_tag_loss);
+		if (__sysctlbyname(ABORT_ON_TAG_LOSS_SYSCTL,
+			strlen(ABORT_ON_TAG_LOSS_SYSCTL), &abort_on_tag_loss,
+			&olen, NULL, 0) == -1) {
+			write_to_stderr("ERROR: could not determine whether "
+			    "tag stripping memcpy should abort. Assuming it "
+			    "shouldn't.\n");
+			abort_on_tag_loss = 0;
+		}
+	}
+	if (abort_on_tag_loss) {
+		write_to_stderr("Note: accidental tag stripping is fatal, set "
+				"the " ABORT_ON_TAG_LOSS_ENVVAR " environment "
+				"variable or the " ABORT_ON_TAG_LOSS_SYSCTL
+				" sysctl to 0 to disable this behaviour.\n");
+		abort();
+	}
+}
+
+/*
+ * Check that we aren't attempting to copy a capabilities to a misaligned
+ * destination (which would strip the tag bit instead of raising an exception).
+ */
+static __noinline __attribute((optnone)) void
+check_no_tagged_capabilities_in_copy(
+    const char *__CAP src, const char *__CAP dst, size_t len)
+{
+	static int error_logged = 0;
+
+	if (len < sizeof(void *__capability)) {
+		return; /* return early if copying less than a capability */
+	}
+	if (error_logged) {
+		return; /* Only report one error */
+	}
+	const vaddr_t src_addr = (__cheri_addr vaddr_t)src;
+	const vaddr_t to_first_cap =
+	    __builtin_align_up(src_addr, sizeof(void *__capability)) - src_addr;
+	const vaddr_t last_clc_offset = len - sizeof(void *__capability);
+	for (vaddr_t offset = to_first_cap; offset <= last_clc_offset;
+	     offset += sizeof(void *__capability)) {
+		const void *__capability *__CAP aligned_src =
+		    (const void *__capability *__CAP)(src + offset);
+		if (__predict_true(!__builtin_cheri_tag_get(*aligned_src))) {
+			continue; /* untagged values are fine */
+		}
+
+		if (error_logged)
+			break;
+		error_logged = 1;
+		/* Got a tagged value, this is always an error! */
+		handle_untagged_copy(
+		    *aligned_src, src_addr, (__cheri_addr vaddr_t)dst, offset);
+	}
+}
+#else
+#define check_no_tagged_capabilities_in_copy(...) (void)0
+#endif
 
 /*
  * Copy a block of memory, handling overlap.
@@ -113,10 +216,12 @@ bcopy(const void *src0, void *dst0, size_t length)
 			 * Try to align operands.  This cannot be done
 			 * unless the low bits match.
 			 */
-			if ((t ^ (__cheri_addr size_t)dst) & wmask || length < wsize)
+			if ((t ^ (__cheri_addr size_t)dst) & wmask || length < wsize) {
 				t = length;
-			else
+				check_no_tagged_capabilities_in_copy(src, dst, length);
+			} else {
 				t = wsize - (t & wmask);
+			}
 			length -= t;
 			TLOOP1(*dst++ = *src++);
 		}
@@ -137,10 +242,13 @@ bcopy(const void *src0, void *dst0, size_t length)
 		dst += length;
 		t = (__cheri_addr size_t)src;
 		if ((t | (__cheri_addr size_t)dst) & wmask) {
-			if ((t ^ (__cheri_addr size_t)dst) & wmask || length <= wsize)
+			if ((t ^ (__cheri_addr size_t)dst) & wmask || length <= wsize) {
+				check_no_tagged_capabilities_in_copy(
+				    src - length, dst - length, length);
 				t = length;
-			else
+			} else {
 				t &= wmask;
+			}
 			length -= t;
 			TLOOP1(*--dst = *--src);
 		}

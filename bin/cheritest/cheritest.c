@@ -1647,12 +1647,16 @@ static const struct cheri_test cheri_tests[] = {
 	/* Unaligned memcpy/memmove with capabilities */
 	{ .ct_name = "test_unaligned_capability_copy_memcpy",
 	  .ct_desc = "Check that a memcpy() of valid capabilities to an "
-		     "unaligned destination strips tags",
-	  .ct_func = test_unaligned_capability_copy_memcpy },
+		     "unaligned destination fails",
+	  .ct_func = test_unaligned_capability_copy_memcpy,
+	  .ct_flags = CT_FLAG_SIGEXIT,
+	  .ct_signum = SIGABRT },
 	{ .ct_name = "test_unaligned_capability_copy_memmove",
 	  .ct_desc = "Check that a memmove() of valid capabilities to an "
-		     "unaligned destination strips tags",
-	  .ct_func = test_unaligned_capability_copy_memmove },
+		     "unaligned destination fails",
+	  .ct_func = test_unaligned_capability_copy_memmove,
+	  .ct_flags = CT_FLAG_SIGEXIT,
+	  .ct_signum = SIGABRT },
 
 	/*
 	 * Thread-Local Storage (TLS) tests.
