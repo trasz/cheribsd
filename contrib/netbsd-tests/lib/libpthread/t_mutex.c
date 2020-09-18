@@ -46,6 +46,7 @@ __RCSID("$NetBSD: t_mutex.c,v 1.15 2017/01/16 16:23:41 christos Exp $");
 #include <inttypes.h> /* For UINT16_MAX */
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <time.h>
@@ -139,16 +140,33 @@ ATF_TC_BODY(mutex1, tc)
 	PTHREAD_REQUIRE(pthread_mutex_unlock(&mutex));
 }
 
+/*
+ * Increment the value using a noinline function that includes a small delay
+ * to increase the window for the RMW data race.
+ */
+__noinline int
+increment(int value)
+{
+	for (volatile int i = 0; i < 100; i++) {
+		/* Small delay between read+write to increase chance of race */
+		__compiler_membar();
+	}
+	return value + 1;
+}
+
+static volatile bool thread2_started = false;
+
 static void *
 mutex2_threadfunc(void *arg)
 {
 	long count = *(int *)arg;
 
+	thread2_started = true;
 	printf("2: Second thread (%p). Count is %ld\n", pthread_self(), count);
 
 	while (count--) {
 		PTHREAD_REQUIRE(mutex_lock(&mutex, &ts_lengthy));
-		global_x++;
+		global_x = increment(global_x);
 		PTHREAD_REQUIRE(pthread_mutex_unlock(&mutex));
 	}
 
@@ -164,16 +182,10 @@ ATF_TC_HEAD(mutex2, tc)
 	atf_tc_set_md_var(tc, "timeout", "40");
 #endif
 #endif
-
-#ifdef __FreeBSD__
-#if defined(__riscv)
-	atf_tc_set_md_var(tc, "timeout", "600");
-#endif
-#endif
 }
 ATF_TC_BODY(mutex2, tc)
 {
-	int count, count2;
+	int count, count2, num_increments;
 	pthread_t new;
 	void *joinval;
 
@@ -188,18 +200,27 @@ ATF_TC_BODY(mutex2, tc)
 	PTHREAD_REQUIRE(pthread_mutex_init(&mutex, NULL));
 	
 	global_x = 0;
-	count = count2 = 10000000;
+	num_increments = count = count2 = 1000;
+	if (getenv("NUM_ITERATIONS") != NULL) {
+		num_increments = count = count2 = atoi(getenv("NUM_ITERATIONS"));
+	}
+	printf("Will use %d iterations\n", num_increments);
+
 
 	PTHREAD_REQUIRE(mutex_lock(&mutex, &ts_lengthy));
+	thread2_started = false;
 	PTHREAD_REQUIRE(pthread_create(&new, NULL, mutex2_threadfunc, &count2));
 
 	printf("1: Thread %p\n", pthread_self());
-
+	while (!thread2_started) {
+		/* Wait for thread 2 to start to increase chance of race */
+	}
+	printf("1: Unlocking to start increment loop %p\n", pthread_self());
 	PTHREAD_REQUIRE(pthread_mutex_unlock(&mutex));
 
 	while (count--) {
 		PTHREAD_REQUIRE(mutex_lock(&mutex, &ts_lengthy));
-		global_x++;
+		global_x = increment(global_x);
 		PTHREAD_REQUIRE(pthread_mutex_unlock(&mutex));
 	}
 
@@ -208,7 +229,10 @@ ATF_TC_BODY(mutex2, tc)
 	PTHREAD_REQUIRE(mutex_lock(&mutex, &ts_lengthy));
 	printf("1: Thread joined. X was %d. Return value (long) was %ld\n",
 		global_x, (long)joinval);
-	ATF_REQUIRE_EQ(global_x, 20000000);
+	ATF_REQUIRE_EQ_MSG(count, -1, "%d", count);
+	ATF_REQUIRE_EQ_MSG((long)joinval, -1, "%ld", (long)joinval);
+	ATF_REQUIRE_EQ_MSG(global_x, num_increments * 2, "%d vs %d", global_x,
+	    num_increments * 2);
 
 #ifdef __NetBSD__
 #if defined(__powerpc__)
@@ -221,16 +245,19 @@ ATF_TC_BODY(mutex2, tc)
 #endif
 }
 
+static volatile bool thread3_started = false;
+
 static void *
 mutex3_threadfunc(void *arg)
 {
 	long count = *(int *)arg;
 
+	thread3_started = true;
 	printf("2: Second thread (%p). Count is %ld\n", pthread_self(), count);
 
 	while (count--) {
 		PTHREAD_REQUIRE(mutex_lock(&static_mutex, &ts_lengthy));
-		global_x++;
+		global_x = increment(global_x);
 		PTHREAD_REQUIRE(pthread_mutex_unlock(&static_mutex));
 	}
 
@@ -247,16 +274,10 @@ ATF_TC_HEAD(mutex3, tc)
 	atf_tc_set_md_var(tc, "timeout", "40");
 #endif
 #endif
-
-#ifdef __FreeBSD__
-#if defined(__riscv)
-	atf_tc_set_md_var(tc, "timeout", "600");
-#endif
-#endif
 }
 ATF_TC_BODY(mutex3, tc)
 {
-	int count, count2;
+	int count, count2, num_increments;
 	pthread_t new;
 	void *joinval;
 
@@ -269,18 +290,25 @@ ATF_TC_BODY(mutex3, tc)
 #endif
 
 	global_x = 0;
-	count = count2 = 10000000;
+	num_increments = count = count2 = 1000;
+	if (getenv("NUM_ITERATIONS") != NULL) {
+		num_increments = count = count2 = atoi(getenv("NUM_ITERATIONS"));
+	}
+	printf("Will use %d iterations\n", num_increments);
 
 	PTHREAD_REQUIRE(mutex_lock(&static_mutex, &ts_lengthy));
 	PTHREAD_REQUIRE(pthread_create(&new, NULL, mutex3_threadfunc, &count2));
 
 	printf("1: Thread %p\n", pthread_self());
-
+	while (!thread3_started) {
+		/* Wait for thread 3 to start to increase chance of race */
+	}
+	printf("1: Unlocking to start increment loop %p\n", pthread_self());
 	PTHREAD_REQUIRE(pthread_mutex_unlock(&static_mutex));
 
 	while (count--) {
 		PTHREAD_REQUIRE(mutex_lock(&static_mutex, &ts_lengthy));
-		global_x++;
+		global_x = increment(global_x);
 		PTHREAD_REQUIRE(pthread_mutex_unlock(&static_mutex));
 	}
 
@@ -289,8 +317,10 @@ ATF_TC_BODY(mutex3, tc)
 	PTHREAD_REQUIRE(mutex_lock(&static_mutex, &ts_lengthy));
 	printf("1: Thread joined. X was %d. Return value (long) was %ld\n",
 		global_x, (long)joinval);
-	ATF_REQUIRE_EQ(global_x, 20000000);
-
+	ATF_REQUIRE_EQ_MSG(count, -1, "%d", count);
+	ATF_REQUIRE_EQ_MSG((long)joinval, -1, "%ld", (long)joinval);
+	ATF_REQUIRE_EQ_MSG(global_x, num_increments * 2, "%d vs %d", global_x,
+	    num_increments * 2);
 #ifdef __NetBSD__
 #if defined(__powerpc__)
 	/* XXX force a timeout in ppc case since an un-triggered race
